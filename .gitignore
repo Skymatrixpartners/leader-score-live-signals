@@ -1,0 +1,29 @@
+# Secrets — never commit these
+.env
+*.env
+secrets.json
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+env/
+
+# Large data files — keep locally only
+data/minute_csv*/
+*.xlsx
+
+# output/signals are committed to repo for easy access
+# output/signals/*.csv
+# output/signals/*.json
+# output/backtest/ and output/research/ are committed for GitHub Pages dashboard
+
+# OS
+.DS_Store
+Thumbs.db

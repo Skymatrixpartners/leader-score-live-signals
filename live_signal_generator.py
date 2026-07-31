@@ -1,0 +1,544 @@
+"""
+Live Signal Generator — Leader Score V2
+========================================
+Runs at ~3:25 PM ET daily. Fetches daily bars for all Russell 1000 tickers
+via the grouped-daily endpoint (one API call per calendar day, covering every
+US ticker at once — not one call per ticker), recomputes all features +
+Leader_Score_V2, and outputs today's BUY signals to
+output/live_signals_YYYY-MM-DD.csv.
+
+No local data files required — all data is fetched via the Massive API.
+
+Usage
+-----
+    python live_signal_generator.py
+    python live_signal_generator.py --date 2026-07-07
+    python live_signal_generator.py --output my_signals.csv
+    python live_signal_generator.py --min-score 85 --top-n 5
+
+Environment
+-----------
+    MASSIVE_API_KEY   required
+    MASSIVE_API_URL   optional (default: https://api.massive.com/v2)
+
+Cloud deployment: see .github/workflows/daily_signals.yml
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+import time
+from datetime import date, timedelta
+from pathlib import Path
+from datetime import datetime
+
+import numpy as np
+import pandas as pd
+import requests
+from dotenv import load_dotenv
+import threading
+
+# Enable flushing of output for real-time logging
+import builtins
+_print = builtins.print
+def print(*args, **kwargs):
+    kwargs.setdefault('flush', True)
+    _print(*args, **kwargs)
+
+# ---------------------------------------------------------------------------
+# Global rate limiter (ensure max 1 request per RATE_LIMIT seconds across ALL workers)
+# ---------------------------------------------------------------------------
+_rate_limit_lock = threading.Lock()
+_last_request_time = 0.0
+
+def _enforce_rate_limit(delay: float):
+    """Enforce global rate limit across all threads."""
+    global _last_request_time
+    with _rate_limit_lock:
+        now = time.time()
+        if now - _last_request_time < delay:
+            time.sleep(delay - (now - _last_request_time))
+        _last_request_time = time.time()
+
+# ---------------------------------------------------------------------------
+# Config
+# ---------------------------------------------------------------------------
+ROOT = Path(__file__).resolve().parent
+
+# .env can be in trail_live/ or one level up at project/.env
+for env_candidate in [ROOT / ".env", ROOT.parent / "project" / ".env"]:
+    if env_candidate.exists():
+        load_dotenv(env_candidate)
+        break
+
+API_KEY  = os.getenv("MASSIVE_API_KEY", "")
+BASE_URL = os.getenv("MASSIVE_API_URL", "https://api.massive.com/v2").rstrip("/")
+
+UNIVERSE_FILE  = ROOT / "data" / "russell_1000.csv"
+OUTPUT_DIR     = ROOT / "output" / "signals"
+LOOKBACK_DAYS  = 90    # fetch 90 calendar days -> ~63 trading days -> covers RS10+ATR20+warmup
+SPY_LOOKBACK   = 310   # fetch 310 calendar days for SPY -> covers SMA50 + SMA200
+RATE_LIMIT     = 0.3   # seconds between grouped-daily API calls (one call covers ALL tickers)
+
+# Score bands (backtest-validated)
+BAND_A_LO, BAND_A_HI = 92.0,  95.0   # 2x  — high-conviction zone
+BAND_B_LO, BAND_B_HI = 98.0, 100.0   # 1x  — moonshots (no leverage)
+# Regime minimum scores
+REGIME_BULL_MIN       = 92.0
+REGIME_NEUTRAL_MIN    = 92.0
+# Universe quality filters
+MIN_PRICE      = 5.0          # exclude stocks below $5
+MIN_AVG_DVOL   = 500_000      # exclude stocks with 20-day avg dollar volume < $500k
+
+# Score weights (IC-validated, must sum to 1.0)
+WEIGHTS = {
+    "RS10_Pct":         0.45,
+    "RS5_Pct":          0.25,
+    "RVOL_Pct":         0.20,
+    "RS3_Pct":          0.05,
+    "DollarVolume_Pct": 0.05,
+}
+
+# ---------------------------------------------------------------------------
+# API helpers
+# ---------------------------------------------------------------------------
+
+def _request(url: str, params: dict, retries: int = 4) -> dict:
+    for attempt in range(1, retries + 1):
+        try:
+            _enforce_rate_limit(RATE_LIMIT)  # Global rate limit
+            r = requests.get(url, params=params, timeout=30)
+            r.raise_for_status()
+            return r.json()
+        except requests.RequestException as exc:
+            # For 429 (rate limit), use longer backoff
+            if "429" in str(exc):
+                sleep = min(5 * (2 ** attempt), 120)  # Longer backoff for rate limits
+            else:
+                sleep = min(2 ** attempt, 30)
+            print(f"  API retry {attempt}/{retries}: {exc}", flush=True)
+            time.sleep(sleep)
+    return {}
+
+
+def fetch_grouped_daily(d: date) -> pd.DataFrame:
+    """
+    Fetch OHLCV for EVERY US ticker on a single date in one API call.
+    Returns empty DataFrame on weekends/holidays (no results) or failure.
+    """
+    url = f"{BASE_URL}/aggs/grouped/locale/us/market/stocks/{d:%Y-%m-%d}"
+    payload = _request(url, {"adjusted": "true", "apiKey": API_KEY})
+    rows = payload.get("results", [])
+    if not rows:
+        return pd.DataFrame()
+    df = pd.DataFrame(rows)
+    df["Date"] = pd.to_datetime(df["t"], unit="ms", utc=True).dt.tz_localize(None).dt.normalize()
+    df = df.rename(columns={"T": "Ticker", "o": "Open", "h": "High", "l": "Low", "c": "Close", "v": "Volume"})
+    return df[["Ticker", "Date", "Open", "High", "Low", "Close", "Volume"]]
+
+
+def fetch_bars_for_universe(tickers: set[str], start: date, end: date) -> dict[str, pd.DataFrame]:
+    """
+    Fetch daily OHLCV for `tickers` over [start, end] via the grouped-daily
+    endpoint — one API call per calendar weekday (covers every ticker at
+    once), instead of one call per ticker. Returns {ticker: sorted DataFrame}.
+    """
+    frames = []
+    d = start
+    n_days = (end - start).days + 1
+    print(f"  Fetching grouped daily bars: {start} to {end} ({n_days} calendar days) ...", flush=True)
+    fetched = 0
+    while d <= end:
+        if d.weekday() < 5:  # skip weekends; holidays just come back empty
+            day_df = fetch_grouped_daily(d)
+            if not day_df.empty:
+                frames.append(day_df[day_df["Ticker"].isin(tickers)])
+                fetched += 1
+        d += timedelta(days=1)
+    print(f"  Grouped fetch done: {fetched} trading days retrieved.", flush=True)
+    if not frames:
+        return {}
+    combined = pd.concat(frames, ignore_index=True)
+    return {
+        ticker: group.sort_values("Date").reset_index(drop=True)
+        for ticker, group in combined.groupby("Ticker")
+    }
+
+
+# ---------------------------------------------------------------------------
+# Feature computation (self-contained, no imports from features/)
+# ---------------------------------------------------------------------------
+
+def compute_ticker_features(
+    ticker: str,
+    sector: str,
+    df: pd.DataFrame,
+    spy_df: pd.DataFrame,
+) -> pd.DataFrame:
+    """
+    Compute all momentum + quality features for one ticker.
+    df and spy_df are daily OHLCV DataFrames sorted ascending by Date.
+    Returns rows for the LAST date only (today's signal row).
+    """
+    if df.empty or len(df) < 12:
+        return pd.DataFrame()
+
+    df = df.copy().sort_values("Date").reset_index(drop=True)
+    spy = spy_df.copy().sort_values("Date").reset_index(drop=True)
+
+    # Align on common dates
+    merged = df.merge(spy[["Date","Close"]].rename(columns={"Close":"SPY_Close"}),
+                      on="Date", how="inner")
+    if len(merged) < 12:
+        return pd.DataFrame()
+
+    merged = merged.sort_values("Date").reset_index(drop=True)
+
+    # Ticker returns
+    merged["Ret2"]  = merged["Close"].pct_change(2)
+    merged["Ret3"]  = merged["Close"].pct_change(3)
+    merged["Ret5"]  = merged["Close"].pct_change(5)
+    merged["Ret10"] = merged["Close"].pct_change(10)
+
+    # SPY returns
+    merged["SPY_Ret2"]  = merged["SPY_Close"].pct_change(2)
+    merged["SPY_Ret3"]  = merged["SPY_Close"].pct_change(3)
+    merged["SPY_Ret5"]  = merged["SPY_Close"].pct_change(5)
+    merged["SPY_Ret10"] = merged["SPY_Close"].pct_change(10)
+
+    # Relative strength vs SPY
+    merged["RS2"]  = merged["Ret2"]  - merged["SPY_Ret2"]
+    merged["RS3"]  = merged["Ret3"]  - merged["SPY_Ret3"]
+    merged["RS5"]  = merged["Ret5"]  - merged["SPY_Ret5"]
+    merged["RS10"] = merged["Ret10"] - merged["SPY_Ret10"]
+
+    # Volume metrics
+    merged["AvgVol20D"] = merged["Volume"].rolling(20, min_periods=10).mean()
+    merged["RVOL"]      = merged["Volume"] / merged["AvgVol20D"].replace(0, np.nan)
+    merged["DollarVolume"] = merged["Close"] * merged["Volume"]
+
+    # ATR20
+    tr = pd.concat([
+        merged["High"] - merged["Low"],
+        (merged["High"] - merged["Close"].shift(1)).abs(),
+        (merged["Low"]  - merged["Close"].shift(1)).abs(),
+    ], axis=1).max(axis=1)
+    merged["ATR20"] = tr.rolling(20, min_periods=10).mean()
+
+    # Keep only the last row (today)
+    last = merged.tail(1).copy()
+    last["Ticker"] = ticker
+    last["Sector"] = sector
+
+    return last[[
+        "Date","Ticker","Sector","Close","Volume",
+        "RS2","RS3","RS5","RS10",
+        "RVOL","AvgVol20D","DollarVolume","ATR20",
+        "SPY_Close",
+    ]]
+
+
+def build_spy_regime(spy_df: pd.DataFrame, as_of: date) -> dict:
+    """Compute SPY SMA50, SMA200 and regime classification for a given date."""
+    spy = spy_df[spy_df["Date"] <= pd.Timestamp(as_of)].tail(210).copy()
+    if len(spy) < 50:
+        return {"regime": "BEAR", "spy_close": None, "sma50": None, "sma200": None}
+    close      = spy["Close"].iloc[-1]
+    sma50      = spy["Close"].tail(50).mean()
+    sma200     = spy["Close"].tail(200).mean() if len(spy) >= 200 else None
+    spy_bull   = (sma200 is not None) and (close > sma50) and (sma50 > sma200)
+    spy_bear   = (sma200 is not None) and (close < sma200)
+    if spy_bull:
+        regime = "BULL"
+    elif spy_bear:
+        regime = "BEAR"
+    else:
+        regime = "NEUTRAL"
+    return {
+        "regime": regime,
+        "spy_close": round(close, 2),
+        "sma50":     round(sma50, 2),
+        "sma200":    round(sma200, 2) if sma200 else None,
+        "spy_bull":  spy_bull,
+        "spy_bear":  spy_bear,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Cross-sectional percentile ranks
+# ---------------------------------------------------------------------------
+
+def add_pct_ranks(df: pd.DataFrame) -> pd.DataFrame:
+    for col, ascending in [
+        ("RS10",        True),
+        ("RS5",         True),
+        ("RS3",         True),
+        ("RVOL",        True),
+        ("DollarVolume",True),
+    ]:
+        if col in df.columns:
+            df[f"{col}_Pct"] = df[col].rank(pct=True, ascending=ascending) * 100
+    return df
+
+
+# ---------------------------------------------------------------------------
+# Score
+# ---------------------------------------------------------------------------
+
+def compute_score(df: pd.DataFrame) -> pd.Series:
+    score = sum(df[col] * w for col, w in WEIGHTS.items() if col in df.columns)
+    return score
+
+
+# ---------------------------------------------------------------------------
+# Signal filter
+# ---------------------------------------------------------------------------
+
+def apply_filters(df: pd.DataFrame, regime: str, top_n: int) -> pd.DataFrame:
+    """Apply regime gate + quality pre-filter + band filter + top-N selection."""
+    if regime == "BEAR":
+        print("  REGIME: BEAR — no trades today.")
+        return pd.DataFrame()
+
+    # Quality pre-filters: price >= $5 and 20-day avg dollar volume >= $500k
+    before = len(df)
+    df = df[df["Close"] >= MIN_PRICE]
+    df = df[df["DollarVolume"] >= MIN_AVG_DVOL]
+    filtered = before - len(df)
+    if filtered:
+        print(f"  Pre-filter: removed {filtered} stocks (price <${MIN_PRICE} or avg dvol <${MIN_AVG_DVOL:,})")
+
+    min_score = REGIME_BULL_MIN if regime == "BULL" else REGIME_NEUTRAL_MIN
+
+    # Band A: score 92-95 → 2x leverage (high-conviction zone)
+    band_a = df[
+        (df["Leader_Score_V2"] >= max(BAND_A_LO, min_score)) &
+        (df["Leader_Score_V2"] <= BAND_A_HI)
+    ].copy()
+    band_a["Band"]     = "A"
+    band_a["Leverage"] = 2.0
+
+    # Band B: score 98-100 → 1x (no leverage, moonshots)
+    band_b = df[
+        (df["Leader_Score_V2"] >= max(BAND_B_LO, min_score)) &
+        (df["Leader_Score_V2"] <= BAND_B_HI)
+    ].copy()
+    band_b["Band"]     = "B"
+    band_b["Leverage"] = 1.0
+
+    combined = pd.concat([band_a, band_b], ignore_index=True)
+    if combined.empty:
+        print("  No stocks pass band filter today.")
+        return pd.DataFrame()
+
+    # Top-N by score across all bands
+    combined = combined.sort_values("Leader_Score_V2", ascending=False).head(top_n)
+    return combined
+
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+
+def parse_args() -> argparse.Namespace:
+    p = argparse.ArgumentParser(description="Leader Score V2 — Live Signal Generator")
+    p.add_argument("--date",      default=None,
+                   help="Signal date YYYY-MM-DD (default: today)")
+    p.add_argument("--output",    default=None,
+                   help="Output CSV path (default: output/signals/live_signals_DATE.csv)")
+    p.add_argument("--universe",  default=str(UNIVERSE_FILE),
+                   help="Universe CSV with ticker,sector columns")
+    p.add_argument("--lookback",  type=int, default=LOOKBACK_DAYS,
+                   help="Calendar days of history to fetch (default: 60)")
+    p.add_argument("--top-n",     type=int, default=10,
+                   help="Max signals to emit (default: 10)")
+    p.add_argument("--min-score", type=float, default=None,
+                   help="Override minimum score threshold")
+    p.add_argument("--no-regime-gate", action="store_true",
+                   help="Ignore SPY regime, score all days")
+    return p.parse_args()
+
+
+def main() -> None:
+    args = parse_args()
+
+    if not API_KEY:
+        print("ERROR: MASSIVE_API_KEY not set. Add to .env or set environment variable.")
+        sys.exit(1)
+
+    signal_date = (
+        date.fromisoformat(args.date) if args.date else date.today()
+    )
+    fetch_start = signal_date - timedelta(days=args.lookback)  # for tickers
+    fetch_end   = signal_date
+
+    print("=" * 60)
+    print(f"  LEADER SCORE V2 — LIVE SIGNALS")
+    print(f"  Signal date : {signal_date}")
+    print(f"  Fetch range : {fetch_start} to {fetch_end}")
+    print("=" * 60)
+
+    # Load universe
+    universe_path = Path(args.universe)
+    if not universe_path.exists():
+        # Fallback: look for russell_1000.csv in common locations
+        for candidate in [
+            ROOT / "data" / "russell_1000.csv",
+            ROOT.parents[1] / "leader_score_v2" / "data" / "minute_csv_1y_all1000" / "russell_1000.csv",
+        ]:
+            if candidate.exists():
+                universe_path = candidate
+                break
+        else:
+            print(f"ERROR: Universe file not found at {args.universe}")
+            sys.exit(1)
+
+    universe = pd.read_csv(universe_path)
+    tickers  = universe["ticker"].dropna().str.upper().unique().tolist()
+    sectors  = dict(zip(universe["ticker"].str.upper(), universe.get("sector", "")))
+    print(f"  Universe    : {len(tickers)} tickers from {universe_path.name}")
+
+    # Single grouped-daily fetch covers SPY + the whole universe over the
+    # longest lookback we need (SPY_LOOKBACK, for SMA200), one API call per
+    # calendar weekday instead of one call per ticker.
+    spy_fetch_start = signal_date - timedelta(days=SPY_LOOKBACK)
+    overall_start = min(fetch_start, spy_fetch_start)
+    bars_by_ticker = fetch_bars_for_universe(set(tickers) | {"SPY"}, overall_start, fetch_end)
+
+    spy_df = bars_by_ticker.get("SPY", pd.DataFrame())
+    if spy_df.empty or len(spy_df) < 10:
+        print("ERROR: Could not fetch SPY data.")
+        sys.exit(1)
+    print(f"  SPY rows: {len(spy_df)}")
+
+    regime_info = build_spy_regime(spy_df, signal_date)
+    regime = regime_info["regime"] if not args.no_regime_gate else "BULL"
+    print(f"\n  SPY Close : {regime_info['spy_close']}")
+    print(f"  SMA50     : {regime_info['sma50']}")
+    print(f"  SMA200    : {regime_info['sma200']}")
+    print(f"  Regime    : {regime}")
+
+    if regime == "BEAR" and not args.no_regime_gate:
+        print("\n  REGIME: BEAR — emitting empty signal file.")
+        signals = pd.DataFrame(columns=["Ticker","Band","Leader_Score_V2","Leverage","Close","ATR20","Sector"])
+        _save_and_print(signals, signal_date, regime_info, args)
+        return
+
+    # Compute features for every ticker from the already-fetched bars
+    print(f"\nComputing features for {len(tickers)} tickers ...", flush=True)
+    all_rows: list[pd.DataFrame] = []
+    failed = 0
+    for ticker in tickers:
+        bars = bars_by_ticker.get(ticker, pd.DataFrame())
+        if bars.empty:
+            failed += 1
+            continue
+        try:
+            row = compute_ticker_features(ticker, sectors.get(ticker, ""), bars, spy_df)
+        except Exception as e:
+            print(f"  ⚠ {ticker}: {type(e).__name__}: {str(e)[:80]}", flush=True)
+            failed += 1
+            continue
+        if row is not None and not row.empty:
+            all_rows.append(row)
+        else:
+            failed += 1
+
+    print(f"  Done. {len(all_rows)} tickers with valid data, {failed} failed.", flush=True)
+
+    if not all_rows:
+        print("ERROR: No ticker data retrieved.")
+        sys.exit(1)
+
+    # Build universe DataFrame for today
+    df = pd.concat(all_rows, ignore_index=True)
+    # Keep only rows matching signal_date (last trading day <= signal_date)
+    max_date = df["Date"].max()
+    df = df[df["Date"] == max_date].copy()
+    print(f"  Using data as of: {max_date.date()}")
+
+    if df.empty:
+        print("ERROR: No rows for today's date.")
+        sys.exit(1)
+
+    # Cross-sectional percentile ranks
+    df = add_pct_ranks(df)
+
+    # Leader Score
+    df["Leader_Score_V2"] = compute_score(df)
+
+    # Apply filters
+    df_signals = apply_filters(df, regime, args.top_n)
+
+    _save_and_print(df_signals, signal_date, regime_info, args)
+
+
+def _save_and_print(
+    signals: pd.DataFrame,
+    signal_date: date,
+    regime_info: dict,
+    args: argparse.Namespace,
+) -> None:
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    out_path = (
+        Path(args.output)
+        if args.output
+        else OUTPUT_DIR / f"live_signals_{signal_date}.csv"
+    )
+
+    # Build output table
+    if not signals.empty:
+        out = signals[[
+            "Ticker", "Band", "Leader_Score_V2", "Leverage",
+            "RS10_Pct", "RS5_Pct", "RVOL_Pct", "RS3_Pct", "DollarVolume_Pct",
+            "Close", "ATR20", "Sector",
+        ]].copy()
+        out["Stop_Price"]    = (out["Close"] - 2.0 * out["ATR20"]).round(2)
+        out["Signal_Date"]   = str(signal_date)
+        out["Regime"]        = regime_info["regime"]
+        out["SPY_Close"]     = regime_info["spy_close"]
+        out["SPY_SMA50"]     = regime_info["sma50"]
+        out["SPY_SMA200"]    = regime_info["sma200"]
+        out["Leader_Score_V2"] = out["Leader_Score_V2"].round(2)
+        for col in ["RS10_Pct","RS5_Pct","RVOL_Pct","RS3_Pct","DollarVolume_Pct"]:
+            if col in out.columns:
+                out[col] = out[col].round(1)
+        out.to_csv(out_path, index=False)
+    else:
+        pd.DataFrame(columns=["Ticker","Band","Leader_Score_V2","Leverage",
+                               "Signal_Date","Regime","SPY_Close"]).to_csv(out_path, index=False)
+
+    # Print summary
+    print()
+    print("=" * 60)
+    print(f"  SIGNALS — {signal_date}  |  Regime: {regime_info['regime']}")
+    print("=" * 60)
+    if signals.empty:
+        print("  No signals today.")
+    else:
+        print(f"  {'Ticker':<8} {'Band':<6} {'Score':>6} {'Lev':>5} {'Close':>8} {'Stop':>8} {'Sector'}")
+        print(f"  {'-'*7:<8} {'-'*5:<6} {'-'*5:>6} {'-'*4:>5} {'-'*7:>8} {'-'*7:>8} {'-'*10}")
+        for _, r in signals.iterrows():
+            stop = round(r["Close"] - 2.0 * r["ATR20"], 2) if "ATR20" in r and pd.notna(r["ATR20"]) else "N/A"
+            print(f"  {r['Ticker']:<8} {r['Band']:<6} {r['Leader_Score_V2']:>6.2f} "
+                  f"{r['Leverage']:>5.1f}x {r['Close']:>8.2f} {str(stop):>8} {r.get('Sector','')}")
+    print()
+    print(f"  Saved -> {out_path}")
+    print()
+
+    # Also write a latest.json for webhook/dashboard consumption
+    latest = {
+        "date":    str(signal_date),
+        "regime":  regime_info["regime"],
+        "spy":     regime_info,
+        "signals": signals[["Ticker","Band","Leader_Score_V2","Leverage","Close","ATR20","Sector"]].to_dict(orient="records") if not signals.empty else [],
+    }
+    json_path = out_path.with_suffix(".json")
+    json_path.write_text(json.dumps(latest, indent=2, default=str))
+    print(f"  JSON   -> {json_path}")
+
+
+if __name__ == "__main__":
+    main()
