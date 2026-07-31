@@ -1,0 +1,79 @@
+name: Daily Live Signals
+
+on:
+  schedule:
+    - cron: '0 19 * * 1-5'
+    - cron: '0 20 * * 1-5'
+  workflow_dispatch:
+    inputs:
+      date:
+        description: 'Signal date YYYY-MM-DD, leave blank for today'
+        required: false
+        default: ''
+
+jobs:
+  generate-signals:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Debug API key and environment
+        env:
+          MASSIVE_API_KEY: ${{ secrets.MASSIVE_API_KEY }}
+        run: |
+          echo "=== Signal Generation Starting ==="
+          echo "Time: $(date -u +'%Y-%m-%d %H:%M:%S UTC')"
+          echo "API key length: ${#MASSIVE_API_KEY}"
+          [ -z "$MASSIVE_API_KEY" ] && echo "❌ ERROR: API key NOT SET" && exit 1
+          echo "✓ API key configured"
+          [ -f "data/russell_1000.csv" ] && echo "✓ Universe file found ($(wc -l < data/russell_1000.csv) tickers)"
+          echo "=== Starting signal generation ==="
+
+      - name: Generate signals
+        timeout-minutes: 55
+        env:
+          MASSIVE_API_KEY: ${{ secrets.MASSIVE_API_KEY }}
+          MASSIVE_API_URL: https://api.massive.com/v2
+        run: |
+          if [ -n "${{ github.event.inputs.date }}" ]; then
+            timeout 50m python live_signal_generator.py --date "${{ github.event.inputs.date }}" || EXIT_CODE=$?
+          else
+            timeout 50m python live_signal_generator.py || EXIT_CODE=$?
+          fi
+          if [ $? -eq 124 ]; then
+            echo "❌ Script execution timeout after 50 minutes"
+            exit 1
+          fi
+          echo "✓ Signal generation completed at $(date -u +'%Y-%m-%d %H:%M:%S UTC')"
+
+      - name: Upload signals artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: live-signals-${{ github.run_id }}
+          path: output/signals/
+          retention-days: 90
+
+      - name: Commit signals to repo
+        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add output/signals/ || true
+          git diff --cached --quiet || git commit -m "signals: $(date -u '+%Y-%m-%d')"
+          git push || true
