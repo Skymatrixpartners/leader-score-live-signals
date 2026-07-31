@@ -80,7 +80,8 @@ UNIVERSE_FILE  = ROOT / "data" / "russell_1000.csv"
 OUTPUT_DIR     = ROOT / "output" / "signals"
 LOOKBACK_DAYS  = 90    # fetch 90 calendar days -> ~63 trading days -> covers RS10+ATR20+warmup
 SPY_LOOKBACK   = 310   # fetch 310 calendar days for SPY -> covers SMA50 + SMA200
-RATE_LIMIT     = 0.3   # seconds between grouped-daily API calls (one call covers ALL tickers)
+RATE_LIMIT     = 12.5  # seconds between grouped-daily API calls -- massive.com free tier is
+                        # hard-capped at 5 req/min (12s exact spacing); 12.5s leaves a small buffer
 
 # Score bands (backtest-validated)
 BAND_A_LO, BAND_A_HI = 92.0,  95.0   # 2x  — high-conviction zone
