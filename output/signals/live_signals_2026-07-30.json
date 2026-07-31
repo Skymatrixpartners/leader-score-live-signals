@@ -1,0 +1,95 @@
+{
+  "date": "2026-07-30",
+  "regime": "NEUTRAL",
+  "spy": {
+    "regime": "NEUTRAL",
+    "spy_close": 741.69,
+    "sma50": 744.72,
+    "sma200": 699.97,
+    "spy_bull": "False",
+    "spy_bear": "False"
+  },
+  "signals": [
+    {
+      "Ticker": "MKTX",
+      "Band": "B",
+      "Leader_Score_V2": 99.66297786720322,
+      "Leverage": 1.0,
+      "Close": 162.76,
+      "ATR20": 5.25775165,
+      "Sector": "SECURITY BROKERS, DEALERS & FLOTATION COMPANIES"
+    },
+    {
+      "Ticker": "CORT",
+      "Band": "B",
+      "Leader_Score_V2": 98.29979879275655,
+      "Leverage": 1.0,
+      "Close": 118.32,
+      "ATR20": 5.499104999999998,
+      "Sector": "PHARMACEUTICAL PREPARATIONS"
+    },
+    {
+      "Ticker": "EXLS",
+      "Band": "A",
+      "Leader_Score_V2": 94.94969818913482,
+      "Leverage": 2.0,
+      "Close": 34.36,
+      "ATR20": 1.387,
+      "Sector": "SERVICES-BUSINESS SERVICES, NEC"
+    },
+    {
+      "Ticker": "CTSH",
+      "Band": "A",
+      "Leader_Score_V2": 93.09859154929578,
+      "Leverage": 2.0,
+      "Close": 53.895,
+      "ATR20": 2.3674600000000003,
+      "Sector": "SERVICES-COMPUTER PROGRAMMING SERVICES"
+    },
+    {
+      "Ticker": "GRMN",
+      "Band": "A",
+      "Leader_Score_V2": 93.01810865191148,
+      "Leverage": 2.0,
+      "Close": 297.55,
+      "ATR20": 8.971745000000004,
+      "Sector": "SEARCH, DETECTION, NAVIGATION, GUIDANCE, AERONAUTICAL SYS"
+    },
+    {
+      "Ticker": "LNC",
+      "Band": "A",
+      "Leader_Score_V2": 92.98289738430583,
+      "Leverage": 2.0,
+      "Close": 46.02,
+      "ATR20": 1.3371600000000001,
+      "Sector": "LIFE INSURANCE"
+    },
+    {
+      "Ticker": "AVTR",
+      "Band": "A",
+      "Leader_Score_V2": 92.77162977867202,
+      "Leverage": 2.0,
+      "Close": 13.86,
+      "ATR20": 0.622535,
+      "Sector": "LABORATORY ANALYTICAL INSTRUMENTS"
+    },
+    {
+      "Ticker": "REGN",
+      "Band": "A",
+      "Leader_Score_V2": 92.75653923541249,
+      "Leverage": 2.0,
+      "Close": 738.34,
+      "ATR20": 19.559220000000018,
+      "Sector": "Healthcare"
+    },
+    {
+      "Ticker": "EPAM",
+      "Band": "A",
+      "Leader_Score_V2": 92.53018108651912,
+      "Leverage": 2.0,
+      "Close": 103.66,
+      "ATR20": 4.943395000000001,
+      "Sector": "SERVICES-COMPUTER PROGRAMMING SERVICES"
+    }
+  ]
+}
