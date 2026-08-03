@@ -2,8 +2,14 @@ name: Daily Live Signals
 
 on:
   schedule:
-    - cron: '0 19 * * 1-5'
-    - cron: '0 20 * * 1-5'
+    # GitHub Actions cron is UTC-only and doesn't shift for US daylight saving,
+    # so two triggers are needed to hit 3:25 PM ET (5 min before the 3:30 PM
+    # entry / 30-min-before-close point) year-round:
+    #   19:25 UTC = 3:25 PM EDT (summer)   |   20:25 UTC = 3:25 PM EST (winter)
+    # The "check_time" step below no-ops whichever one fires at the wrong
+    # local time for the current season, so only one actually runs per day.
+    - cron: '25 19 * * 1-5'
+    - cron: '25 20 * * 1-5'
   workflow_dispatch:
     inputs:
       date:
@@ -19,21 +25,41 @@ jobs:
       contents: write
 
     steps:
+      - name: Check target ET time (skip the DST-mismatched cron trigger)
+        id: check_time
+        run: |
+          ET_TIME=$(TZ=America/New_York date +%H:%M)
+          echo "Current ET time: $ET_TIME"
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+            echo "Manual trigger -- running regardless of time."
+          elif [[ "$ET_TIME" > "15:15" && "$ET_TIME" < "15:40" ]]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+            echo "Within 3:15-3:40 PM ET window -- proceeding."
+          else
+            echo "run=false" >> "$GITHUB_OUTPUT"
+            echo "Outside target window (this is the other season's cron firing at the wrong local time) -- skipping."
+          fi
+
       - name: Checkout repository
+        if: steps.check_time.outputs.run == 'true'
         uses: actions/checkout@v4
 
       - name: Set up Python 3.11
+        if: steps.check_time.outputs.run == 'true'
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
           cache: 'pip'
 
       - name: Install dependencies
+        if: steps.check_time.outputs.run == 'true'
         run: |
           pip install --upgrade pip
           pip install -r requirements.txt
 
       - name: Debug API key and environment
+        if: steps.check_time.outputs.run == 'true'
         env:
           MASSIVE_API_KEY: ${{ secrets.MASSIVE_API_KEY }}
         run: |
@@ -46,6 +72,7 @@ jobs:
           echo "=== Starting signal generation ==="
 
       - name: Generate signals
+        if: steps.check_time.outputs.run == 'true'
         timeout-minutes: 55
         env:
           MASSIVE_API_KEY: ${{ secrets.MASSIVE_API_KEY }}
@@ -67,6 +94,7 @@ jobs:
           echo "✓ Signal generation completed at $(date -u +'%Y-%m-%d %H:%M:%S UTC')"
 
       - name: Upload signals artifact
+        if: steps.check_time.outputs.run == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: live-signals-${{ github.run_id }}
@@ -74,7 +102,7 @@ jobs:
           retention-days: 90
 
       - name: Commit signals to repo
-        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+        if: steps.check_time.outputs.run == 'true' && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
