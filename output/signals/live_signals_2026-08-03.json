@@ -1,0 +1,95 @@
+{
+  "date": "2026-08-03",
+  "regime": "BULL",
+  "spy": {
+    "regime": "BULL",
+    "spy_close": 757.67,
+    "sma50": 745.32,
+    "sma200": 700.86,
+    "spy_bull": "True",
+    "spy_bear": "False"
+  },
+  "signals": [
+    {
+      "Ticker": "MSFT",
+      "Band": "B",
+      "Leader_Score_V2": 98.26458752515092,
+      "Leverage": 1.0,
+      "Close": 487.65,
+      "ATR20": 15.234994999999998,
+      "Sector": "Technology"
+    },
+    {
+      "Ticker": "EPAM",
+      "Band": "A",
+      "Leader_Score_V2": 94.27565392354124,
+      "Leverage": 2.0,
+      "Close": 107.26,
+      "ATR20": 5.201845,
+      "Sector": "SERVICES-COMPUTER PROGRAMMING SERVICES"
+    },
+    {
+      "Ticker": "ORCL",
+      "Band": "A",
+      "Leader_Score_V2": 94.2605633802817,
+      "Leverage": 2.0,
+      "Close": 141.85,
+      "ATR20": 7.291000000000001,
+      "Sector": "Technology"
+    },
+    {
+      "Ticker": "MKTX",
+      "Band": "A",
+      "Leader_Score_V2": 94.1549295774648,
+      "Leverage": 2.0,
+      "Close": 162.28,
+      "ATR20": 4.95075165,
+      "Sector": "SECURITY BROKERS, DEALERS & FLOTATION COMPANIES"
+    },
+    {
+      "Ticker": "SNOW",
+      "Band": "A",
+      "Leader_Score_V2": 93.21428571428571,
+      "Leverage": 2.0,
+      "Close": 307.53,
+      "ATR20": 14.230615,
+      "Sector": "Technology"
+    },
+    {
+      "Ticker": "BA",
+      "Band": "A",
+      "Leader_Score_V2": 93.158953722334,
+      "Leverage": 2.0,
+      "Close": 233.49,
+      "ATR20": 7.410889999999999,
+      "Sector": "Industrials"
+    },
+    {
+      "Ticker": "ARES",
+      "Band": "A",
+      "Leader_Score_V2": 92.83199195171028,
+      "Leverage": 2.0,
+      "Close": 138.57,
+      "ATR20": 4.8940399999999995,
+      "Sector": "INVESTMENT ADVICE"
+    },
+    {
+      "Ticker": "DLB",
+      "Band": "A",
+      "Leader_Score_V2": 92.47987927565391,
+      "Leverage": 2.0,
+      "Close": 59.73,
+      "ATR20": 1.8345000000000014,
+      "Sector": "PATENT OWNERS & LESSORS"
+    },
+    {
+      "Ticker": "WTW",
+      "Band": "A",
+      "Leader_Score_V2": 92.0774647887324,
+      "Leverage": 2.0,
+      "Close": 341.63,
+      "ATR20": 8.894990000000004,
+      "Sector": "INSURANCE AGENTS, BROKERS & SERVICE"
+    }
+  ]
+}
